@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:developer' as developer; // For performance tracing
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +7,9 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pip/pip.dart'; // Assuming this is 'pip_flutter' or a similar package
+import 'package:screen_brightness/screen_brightness.dart';
+
+import 'player_ui_constants.dart'; // Added import
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,23 +54,36 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _pipActive = false;
   bool _error = false;
   bool _justExitedPip = false;
+  bool _isInteractingWithControls = false; // New state for interaction
 
   Timer? _overlayTimer;
+
+  double _playbackSpeed = 1.0;
+  double _volume = 100.0;
+  double _brightness = 0.5; // Default brightness
 
   @override
   void initState() {
     super.initState();
-    developer.log('HomeScreen: initState Start', name: 'my_app_perf_log');
     _initPlayer();
     _initPiP();
     _checkPipActive();
     WidgetsBinding.instance.addObserver(this);
-    developer.log('HomeScreen: initState End', name: 'my_app_perf_log');
+    _initializeBrightness();
+    _showOverlayAndStartTimer();
+  }
+
+  Future<void> _initializeBrightness() async {
+    try {
+      _brightness = await ScreenBrightness().current;
+      if (mounted) setState(() {});
+    } catch (e) {
+      print("Failed to get current brightness: $e");
+    }
   }
 
   @override
   void dispose() {
-    developer.log('HomeScreen: dispose Start', name: 'my_app_perf_log');
     WidgetsBinding.instance.removeObserver(this);
     _player.pause();
     _player.dispose();
@@ -76,79 +91,46 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _isPlayingNotifier.dispose();
     _isLoadingNotifier.dispose();
     _durationNotifier.dispose();
-    developer.log('HomeScreen: dispose End', name: 'my_app_perf_log');
     super.dispose();
   }
 
   @override
   Future<void> didChangeAppLifecycleState(AppLifecycleState state) async {
     super.didChangeAppLifecycleState(state);
-    developer.log(
-      'AppLifecycleState changed to: $state',
-      name: 'my_app_perf_log',
-    );
     if (!mounted) return;
 
     final bool isPipCurrentlyActive = await _pip.isActived();
-    developer.log(
-      'PiP status check in didChangeAppLifecycleState: $isPipCurrentlyActive, current _pipActive: $_pipActive',
-      name: 'my_app_perf_log',
-    );
 
     if (state == AppLifecycleState.resumed) {
       if (_pipActive && !isPipCurrentlyActive) {
-        developer.log(
-          'Exited PiP mode (detected via AppLifecycleState.resumed)',
-          name: 'my_app_perf_log',
-        );
         if (mounted) {
           setState(() {
             _pipActive = false;
             _showOverlay = true;
             _justExitedPip = true;
+            _isInteractingWithControls = false;
           });
-          // Start hide timer automatically after PiP exit
-          _overlayTimer?.cancel();
-          _overlayTimer = Timer(const Duration(seconds: 2), () {
-            if (mounted && !_pipActive) {
-              setState(() {
-                _showOverlay = false;
-                _justExitedPip = false;
-              });
-            }
-          });
+          _showOverlayAndStartTimer();
         }
       } else if (isPipCurrentlyActive != _pipActive) {
-        developer.log(
-          'Syncing PiP state on resume. Plugin says: $isPipCurrentlyActive, local was: $_pipActive',
-          name: 'my_app_perf_log',
-        );
         if (mounted) {
           setState(() {
             _pipActive = isPipCurrentlyActive;
             _showOverlay = !isPipCurrentlyActive;
-            if (!_pipActive && _justExitedPip) {
-              // This case might be redundant if the above handles it,
-              // but ensures _justExitedPip is true if we determine we just left PiP.
-            } else if (!_pipActive) {
-              _justExitedPip =
-                  false; // If not in PiP and didn't just exit, reset flag.
-            }
+            if (!_pipActive) _justExitedPip = false;
+            _isInteractingWithControls = false;
           });
         }
       }
+      _initializeBrightness();
     } else if (state == AppLifecycleState.paused) {
       if (isPipCurrentlyActive && !_pipActive) {
-        developer.log(
-          'App paused, PiP detected as active. Updating local state.',
-          name: 'my_app_perf_log',
-        );
         if (mounted) {
           setState(() {
             _pipActive = true;
             _showOverlay = false;
-            _justExitedPip =
-                false; // When entering PiP, we haven't "just exited"
+            _justExitedPip = false;
+            _isInteractingWithControls = false;
           });
         }
       }
@@ -158,7 +140,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _checkPipActive() async {
     if (!mounted) return;
     bool active = await _pip.isActived();
-    developer.log('Initial PiP check: $active', name: 'my_app_perf_log');
     if (mounted) {
       setState(() {
         _pipActive = active;
@@ -166,7 +147,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _showOverlay = false;
           _justExitedPip = false;
         } else if (_justExitedPip) {
-          // Start timer after exiting PiP
           _showOverlayAndStartTimer();
         }
       });
@@ -174,7 +154,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _initPlayer() async {
-    developer.log('HomeScreen: _initPlayer Start', name: 'my_app_perf_log');
     try {
       _player = Player();
       _controller = VideoController(_player);
@@ -198,31 +177,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _isPlayingNotifier.value = false;
         }
       });
-    } catch (e, s) {
-      developer.log(
-        'HomeScreen: _initPlayer Error: $e',
-        stackTrace: s,
-        name: 'my_app_perf_log',
-        error: e,
-      );
+      _player.setVolume(_volume);
+      _player.setRate(_playbackSpeed);
+    } catch (e) {
       if (mounted) setState(() => _error = true);
     } finally {
       if (mounted) _isLoadingNotifier.value = false;
-      developer.log('HomeScreen: _initPlayer End', name: 'my_app_perf_log');
     }
   }
 
   Future<File> _copyAssetToFile(String assetPath) async {
-    final stopwatch = Stopwatch()..start();
     final byteData = await rootBundle.load(assetPath);
     final tempDir = await getTemporaryDirectory();
     final file = File('${tempDir.path}/sample_video.mp4');
     await file.writeAsBytes(byteData.buffer.asUint8List());
-    developer.log(
-      'HomeScreen: _copyAssetToFile completed in ${stopwatch.elapsedMilliseconds}ms for $assetPath',
-      name: 'my_app_perf_log',
-    );
-    stopwatch.stop();
     return file;
   }
 
@@ -236,15 +204,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             autoEnterEnabled: false,
           ),
         );
-        developer.log('PiP setup successful', name: 'my_app_perf_log');
-      } catch (e) {
-        developer.log('Error setting up PiP: $e', name: 'my_app_perf_log');
-      }
-    } else {
-      developer.log(
-        'PiP is not supported on this device.',
-        name: 'my_app_perf_log',
-      );
+      } catch (_) {}
     }
   }
 
@@ -252,7 +212,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final currentPosition = _player.state.position;
     final newPosition = currentPosition + offset;
     _player.seek(newPosition < Duration.zero ? Duration.zero : newPosition);
-    _showOverlayWithTimeoutIfNeeded();
+    _resetOverlayTimer();
   }
 
   void _toggleFullscreen() {
@@ -268,413 +228,319 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     }
-    _showOverlayWithTimeoutIfNeeded();
+    _resetOverlayTimer();
   }
 
   void _toggleMute() {
     if (!mounted) return;
     setState(() => _muted = !_muted);
-    _player.setVolume(_muted ? 0.0 : 100.0);
-    _showOverlayWithTimeoutIfNeeded();
+    _player.setVolume(_muted ? 0.0 : _volume);
+    if (!_muted && _volume == 0.0) {
+      _volume = 50.0; // Keep this as a default recovery volume for now
+      _player.setVolume(_volume);
+    }
+    _resetOverlayTimer();
   }
 
   Future<void> _enterPiP() async {
     if (!mounted || _pipActive) return;
     if (await _pip.isSupported()) {
       _overlayTimer?.cancel();
-      setState(() {
-        _showOverlay = false;
-      }); // Optimistically hide
-      developer.log('Attempting to enter PiP mode...', name: 'my_app_perf_log');
+      setState(() => _showOverlay = false);
       try {
         await _pip.start();
-        // Check activation status AFTER attempting to start
         bool success = await _pip.isActived();
         if (mounted) {
-          if (success) {
-            developer.log(
-              'Entered PiP mode successfully',
-              name: 'my_app_perf_log',
-            );
-            setState(() {
-              _pipActive = true;
-              _showOverlay = false; // Ensure it's hidden
-              _justExitedPip = false;
-            });
-          } else {
-            developer.log(
-              'Failed to enter PiP mode (plugin reported not active after start)',
-              name: 'my_app_perf_log',
-            );
-            setState(() {
-              _pipActive = false; // Ensure state is correct
-              // If PiP failed, show overlay again
-              if (!_showOverlay) _showOverlayWithTimeoutIfNeeded();
-            });
-          }
+          setState(() {
+            _pipActive = success;
+            _showOverlay = !success;
+            _justExitedPip = false;
+          });
         }
-      } catch (e) {
-        developer.log(
-          'Error calling _pip.start(): $e',
-          name: 'my_app_perf_log',
-        );
+      } catch (_) {
         if (mounted) {
           setState(() {
             _pipActive = false;
-            if (!_showOverlay) _showOverlayWithTimeoutIfNeeded();
+            if (!_showOverlay) _resetOverlayTimer();
           });
         }
       }
-    } else {
-      developer.log(
-        'PiP not supported, cannot enter.',
-        name: 'my_app_perf_log',
-      );
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Picture-in-Picture is not supported.')),
-      );
     }
   }
 
-  Future<void> _manualExitPiP() async {
-    if (!mounted || !_pipActive) return;
-    developer.log(
-      'Attempting to manually exit PiP mode...',
-      name: 'my_app_perf_log',
-    );
-    // Your PiP package might have a _pip.stop() or _pip.exit() method.
-    // If it does, call it here. Then, didChangeAppLifecycleState should handle the UI update.
-    // For now, this is a placeholder. If _pip.stop() exists:
-    // try {
-    //   await _pip.stop();
-    //   // AppLifecycleState should then catch the change.
-    // } catch(e) {
-    //   developer.log('Error calling _pip.stop(): $e', name: 'my_app_perf_log');
-    // }
-    // If no explicit stop method, this button might just bring the app to focus,
-    // and didChangeAppLifecycleState would handle the state change.
+  void _handleInteractionStart() {
+    if (!mounted) return;
+    setState(() => _isInteractingWithControls = true);
+    _overlayTimer?.cancel(); // Pause timer during interaction
   }
 
-  // Call this when user interacts with player controls (play, seek, etc.)
-  // or when explicitly tapping the video to show controls.
+  void _handleInteractionEnd() {
+    if (!mounted) return;
+    setState(() => _isInteractingWithControls = false);
+    _resetOverlayTimer(); // Reset timer after interaction
+  }
+
   void _showOverlayAndStartTimer() {
     if (!mounted || _pipActive) return;
-
-    if (!_showOverlay) {
-      setState(() => _showOverlay = true);
-    }
-    _overlayTimer?.cancel();
-    _overlayTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted && !_pipActive && _showOverlay) {
-        setState(() => _showOverlay = false);
-      }
-    });
-    // CRITICAL: Any action that shows the overlay and starts the timer
-    // means the user has interacted, so we are no longer "just exited PiP".
-    if (_justExitedPip) {
-      setState(() => _justExitedPip = false);
-    }
+    if (!_showOverlay) setState(() => _showOverlay = true);
+    _resetOverlayTimer();
+    if (_justExitedPip) setState(() => _justExitedPip = false);
   }
 
-  // Call this when UI elements that should refresh the overlay timer are interacted with
-  // (e.g., seek buttons, play/pause, mute, fullscreen toggle).
-  void _showOverlayWithTimeoutIfNeeded() {
-    if (!mounted || _pipActive) return;
-
-    // Always show overlay first
-    if (!_showOverlay) setState(() => _showOverlay = true);
-
+  void _resetOverlayTimer() {
+    if (!mounted || _pipActive || _isInteractingWithControls) return;
     _overlayTimer?.cancel();
-    _overlayTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted && !_pipActive) {
-        setState(() => _showOverlay = false);
-      }
-    });
-
-    _justExitedPip = false; // Reset flag on any interaction
+    if (_showOverlay) {
+      _overlayTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted &&
+            !_pipActive &&
+            _showOverlay &&
+            !_isInteractingWithControls) {
+          setState(() => _showOverlay = false);
+        }
+      });
+    }
+    _justExitedPip = false;
   }
 
   String _formatDuration(Duration d) {
     if (d.isNegative) d = Duration.zero;
-    if (d.inHours > 0) return d.toString().split('.').first.padLeft(8, "0");
+    final hours = d.inHours;
     final minutes = d.inMinutes.remainder(60).toString().padLeft(2, "0");
     final seconds = d.inSeconds.remainder(60).toString().padLeft(2, "0");
+    if (hours > 0) {
+      return "${hours.toString().padLeft(2, "0")}:$minutes:$seconds";
+    }
     return "$minutes:$seconds";
   }
 
   @override
   Widget build(BuildContext context) {
-    developer.log(
-      'HomeScreen: build. PiP: $_pipActive, Overlay: $_showOverlay, JustExitedPiP: $_justExitedPip',
-      name: 'my_app_perf_log',
-    );
-    final showAppBar = !_isFullscreen && !_pipActive;
     final isCurrentlyPip = _pipActive;
+    final mediaQuery = MediaQuery.of(context);
 
-    final double iconSize = isCurrentlyPip ? 20 : 40;
-    final double playButtonSize = isCurrentlyPip ? 30 : 56;
-    final EdgeInsets overlayPadding =
-        isCurrentlyPip
-            ? const EdgeInsets.all(4)
-            : const EdgeInsets.symmetric(horizontal: 16, vertical: 12);
+    // Define base icon sizes
+    double baseControlIconSize = isCurrentlyPip ? 18 : 24;
+    double baseMainPlaybackIconSize = isCurrentlyPip ? 28 : 40;
 
-    return WillPopScope(
-      onWillPop: () async {
-        if (_isFullscreen) {
-          _toggleFullscreen();
-          return false;
-        }
-        return true;
-      },
-      child: Scaffold(
+    double effectiveControlIconSize =
+        _isFullscreen && !isCurrentlyPip
+            ? baseControlIconSize * 1.2
+            : baseControlIconSize;
+    double effectiveMainPlaybackIconSize =
+        _isFullscreen && !isCurrentlyPip
+            ? baseMainPlaybackIconSize * 1.2
+            : baseMainPlaybackIconSize;
+    double effectivePlayPauseIconSize =
+        _isFullscreen && !isCurrentlyPip
+            ? (baseMainPlaybackIconSize + 10) * 1.2
+            : baseMainPlaybackIconSize + 10;
+
+    final double sideSliderWidth =
+        PlayerUiConstants.sideSliderWidthPortrait; // Using constant
+
+    double playerAspectRatio;
+    if (_isFullscreen) {
+      playerAspectRatio =
+          (_player.state.width != null &&
+                  _player.state.height != null &&
+                  _player.state.width! > 0 &&
+                  _player.state.height! > 0)
+              ? _player.state.width! / _player.state.height!
+              : 16 / 9;
+    } else if (isCurrentlyPip) {
+      playerAspectRatio = 16 / 9;
+    } else {
+      playerAspectRatio = 9 / 16;
+    }
+
+    final double sliderTopOffset =
+        _isFullscreen
+            ? mediaQuery.size.height *
+                0.1 // Kept dynamic for now
+            : mediaQuery.size.height * 0.2; // Kept dynamic for now
+    final double sliderBottomOffset =
+        _isFullscreen
+            ? PlayerUiConstants
+                .sideSliderBottomOffsetLandscape // Using constant
+            : mediaQuery.size.height * 0.3; // Kept dynamic for now
+
+    // *** MAIN LAYOUT Split ***
+    if (_isFullscreen && !isCurrentlyPip) {
+      // Fullscreen: overlays expand edge to edge
+      return Scaffold(
         backgroundColor: Colors.black,
         body: SafeArea(
-          top: !showAppBar,
-          bottom: !_isFullscreen,
+          child: Stack(
+            fit: StackFit.expand,
+            alignment: Alignment.center,
+            children: [
+              GestureDetector(
+                onTap: () {
+                  if (isCurrentlyPip || _isInteractingWithControls) return;
+                  if (!_showOverlay || _justExitedPip) {
+                    _showOverlayAndStartTimer();
+                  } else {
+                    setState(() => _showOverlay = false);
+                    _overlayTimer?.cancel();
+                  }
+                },
+                child: Video(
+                  controller: _controller,
+                  controls: null,
+                  fit: BoxFit.contain,
+                ),
+              ),
+              if (_showOverlay && !_error && !isCurrentlyPip) ...[
+                // Left Brightness Slider
+                Positioned(
+                  left: PlayerUiConstants.p10, // Using constant
+                  top: sliderTopOffset,
+                  bottom: sliderBottomOffset,
+                  width: sideSliderWidth,
+                  child: _buildBrightnessSlider(context),
+                ),
+                // Right Volume Slider
+                Positioned(
+                  right: PlayerUiConstants.p10, // Using constant
+                  top: sliderTopOffset,
+                  bottom: sliderBottomOffset,
+                  width: sideSliderWidth,
+                  child: _buildVolumeSlider(context),
+                ),
+                // Centered Play/Pause and Seek Controls
+                _buildCentralControls(
+                  effectiveMainPlaybackIconSize,
+                  effectivePlayPauseIconSize,
+                ),
+                // Bottom Controls Bar
+                Positioned(
+                  bottom: PlayerUiConstants.p10, // Using constant
+                  left: PlayerUiConstants.p10, // Using constant
+                  right: PlayerUiConstants.p10, // Using constant
+                  child: _buildBottomBar(context, effectiveControlIconSize),
+                ),
+              ],
+              if (_isLoadingNotifier.value && !isCurrentlyPip)
+                Center(
+                  child: CircularProgressIndicator(
+                    color:
+                        PlayerUiConstants
+                            .generalProgressIndicatorColor, // Using constant
+                  ),
+                ),
+              if (_error && !isCurrentlyPip)
+                Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.error_outline,
+                        color:
+                            PlayerUiConstants.errorIconColor, // Using constant
+                        size: PlayerUiConstants.errorIconSize, // Using constant
+                      ),
+                      const SizedBox(
+                        height: PlayerUiConstants.p8,
+                      ), // Using constant
+                      Text(
+                        "Error loading video",
+                        style: TextStyle(
+                          color: PlayerUiConstants.errorTextColor,
+                        ), // Using constant
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    } else {
+      // Portrait/inset or PiP: overlays within aspect ratio
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
           child: Center(
             child: AspectRatio(
-              aspectRatio: _isFullscreen || isCurrentlyPip ? 16 / 9 : 9 / 16,
+              aspectRatio: playerAspectRatio,
               child: Stack(
                 alignment: Alignment.center,
                 children: [
                   GestureDetector(
                     onTap: () {
-                      if (isCurrentlyPip) return; // No overlay toggling in PiP
-
-                      // If overlay is hidden OR if it's shown *because* we just exited PiP
-                      // then a tap should show it and start the timer (and clear _justExitedPip).
+                      if (isCurrentlyPip || _isInteractingWithControls) return;
                       if (!_showOverlay || _justExitedPip) {
-                        _showOverlayAndStartTimer(); // This will also set _justExitedPip = false
-                      }
-                      // If overlay is already shown (and not because we just exited PiP),
-                      // then a tap should hide it.
-                      else {
+                        _showOverlayAndStartTimer();
+                      } else {
                         setState(() => _showOverlay = false);
                         _overlayTimer?.cancel();
                       }
                     },
-                    child: Video(controller: _controller, controls: null),
+                    child: Video(
+                      controller: _controller,
+                      controls: null,
+                      fit: BoxFit.contain,
+                    ),
                   ),
-                  ValueListenableBuilder<bool>(
-                    valueListenable: _isLoadingNotifier,
-                    builder: (context, isLoading, child) {
-                      if (isLoading && !isCurrentlyPip) {
-                        return const Center(
-                          child: CircularProgressIndicator(color: Colors.white),
-                        );
-                      }
-                      return const SizedBox.shrink();
-                    },
-                  ),
-                  if (_error && !isCurrentlyPip)
-                    const Center(
-                      child: Text(
-                        "Failed to load video.",
-                        style: TextStyle(color: Colors.red, fontSize: 18),
+                  if (_showOverlay && !_error && !isCurrentlyPip) ...[
+                    Positioned(
+                      left: PlayerUiConstants.p10, // Using constant
+                      top: sliderTopOffset,
+                      bottom: sliderBottomOffset,
+                      width: sideSliderWidth,
+                      child: _buildBrightnessSlider(context),
+                    ),
+                    Positioned(
+                      right: PlayerUiConstants.p10, // Using constant
+                      top: sliderTopOffset,
+                      bottom: sliderBottomOffset,
+                      width: sideSliderWidth,
+                      child: _buildVolumeSlider(context),
+                    ),
+                    _buildCentralControls(
+                      effectiveMainPlaybackIconSize,
+                      effectivePlayPauseIconSize,
+                    ),
+                    Positioned(
+                      bottom: PlayerUiConstants.p10, // Using constant
+                      left: PlayerUiConstants.p10, // Using constant
+                      right: PlayerUiConstants.p10, // Using constant
+                      child: _buildBottomBar(context, effectiveControlIconSize),
+                    ),
+                  ],
+                  if (_isLoadingNotifier.value && !isCurrentlyPip)
+                    Center(
+                      child: CircularProgressIndicator(
+                        color:
+                            PlayerUiConstants
+                                .generalProgressIndicatorColor, // Using constant
                       ),
                     ),
-
-                  if (_showOverlay && !_error && !isCurrentlyPip)
-                    Positioned.fill(
-                      child: Container(
-                        padding: overlayPadding,
-                        color: Colors.black.withOpacity(0.45),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceEvenly,
-                                    children: [
-                                      IconButton(
-                                        iconSize: iconSize,
-                                        color: Colors.white,
-                                        icon: const Icon(Icons.replay_10),
-                                        onPressed:
-                                            () => _seekRelative(
-                                              const Duration(seconds: -10),
-                                            ),
-                                      ),
-                                      ValueListenableBuilder<bool>(
-                                        valueListenable: _isPlayingNotifier,
-                                        builder: (context, isPlaying, child) {
-                                          return IconButton(
-                                            iconSize: playButtonSize,
-                                            color: Colors.white,
-                                            icon: Icon(
-                                              isPlaying
-                                                  ? Icons.pause_circle_filled
-                                                  : Icons.play_circle_fill,
-                                            ),
-                                            onPressed: () {
-                                              _player.playOrPause();
-                                              _showOverlayWithTimeoutIfNeeded();
-                                            },
-                                          );
-                                        },
-                                      ),
-                                      IconButton(
-                                        iconSize: iconSize,
-                                        color: Colors.white,
-                                        icon: const Icon(Icons.forward_10),
-                                        onPressed:
-                                            () => _seekRelative(
-                                              const Duration(seconds: 10),
-                                            ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Row(
-                                  children: [
-                                    StreamBuilder<Duration>(
-                                      stream: _player.stream.position,
-                                      builder:
-                                          (context, snapshot) => Text(
-                                            _formatDuration(
-                                              snapshot.data ?? Duration.zero,
-                                            ),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                    ),
-                                    Expanded(
-                                      child: StreamBuilder<Duration>(
-                                        stream: _player.stream.position,
-                                        builder: (context, positionSnapshot) {
-                                          final currentPosition =
-                                              positionSnapshot.data ??
-                                              Duration.zero;
-                                          return ValueListenableBuilder<
-                                            Duration
-                                          >(
-                                            valueListenable: _durationNotifier,
-                                            builder: (
-                                              context,
-                                              duration,
-                                              child,
-                                            ) {
-                                              return SliderTheme(
-                                                data: SliderTheme.of(
-                                                  context,
-                                                ).copyWith(
-                                                  trackHeight: 2.0,
-                                                  thumbShape:
-                                                      const RoundSliderThumbShape(
-                                                        enabledThumbRadius: 6.0,
-                                                      ),
-                                                  overlayShape:
-                                                      const RoundSliderOverlayShape(
-                                                        overlayRadius: 12.0,
-                                                      ),
-                                                ),
-                                                child: Slider(
-                                                  min: 0,
-                                                  max: duration.inMilliseconds
-                                                      .toDouble()
-                                                      .clamp(
-                                                        1.0,
-                                                        double.infinity,
-                                                      ),
-                                                  value:
-                                                      currentPosition
-                                                          .inMilliseconds
-                                                          .clamp(
-                                                            0.0,
-                                                            duration
-                                                                .inMilliseconds
-                                                                .toDouble(),
-                                                          )
-                                                          .toDouble(),
-                                                  onChanged: (v) {
-                                                    _player.seek(
-                                                      Duration(
-                                                        milliseconds: v.toInt(),
-                                                      ),
-                                                    );
-                                                    _showOverlayWithTimeoutIfNeeded();
-                                                  },
-                                                  activeColor: Colors.amber,
-                                                  inactiveColor: Colors.white38,
-                                                ),
-                                              );
-                                            },
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                    ValueListenableBuilder<Duration>(
-                                      valueListenable: _durationNotifier,
-                                      builder:
-                                          (context, duration, child) => Text(
-                                            _formatDuration(duration),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                    ),
-                                  ],
-                                ),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    IconButton(
-                                      iconSize: iconSize - 8,
-                                      color: Colors.white,
-                                      icon: Icon(
-                                        _muted
-                                            ? Icons.volume_off
-                                            : Icons.volume_up,
-                                      ),
-                                      onPressed: _toggleMute,
-                                    ),
-                                    if (!_pipActive &&
-                                        (ModalRoute.of(context)?.isCurrent ??
-                                            false)) // Only show if not in PiP and current route
-                                      IconButton(
-                                        iconSize: iconSize - 8,
-                                        color: Colors.white,
-                                        icon: const Icon(
-                                          Icons.picture_in_picture_alt,
-                                        ),
-                                        onPressed: _enterPiP,
-                                      ),
-                                    if (_pipActive)
-                                      IconButton(
-                                        iconSize: iconSize - 8,
-                                        color: Colors.white,
-                                        icon: const Icon(Icons.launch),
-                                        onPressed: _manualExitPiP,
-                                      ),
-                                    IconButton(
-                                      iconSize: iconSize - 8,
-                                      color: Colors.white,
-                                      icon: Icon(
-                                        _isFullscreen
-                                            ? Icons.fullscreen_exit
-                                            : Icons.fullscreen,
-                                      ),
-                                      onPressed: _toggleFullscreen,
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
+                  if (_error && !isCurrentlyPip)
+                    Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.error_outline,
+                            color:
+                                PlayerUiConstants
+                                    .errorIconColor, // Using constant
+                            size:
+                                PlayerUiConstants
+                                    .errorIconSize, // Using constant
+                          ),
+                          const SizedBox(
+                            height: PlayerUiConstants.p8,
+                          ), // Using constant
+                          Text(
+                            "Error loading video",
+                            style: TextStyle(
+                              color: PlayerUiConstants.errorTextColor,
+                            ), // Using constant
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -682,6 +548,400 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
         ),
+      );
+    }
+  }
+
+  // --- Helper Widgets split out for reuse (optional but clearer) ---
+
+  Widget _buildBrightnessSlider(BuildContext context) {
+    final isFull = _isFullscreen && !_pipActive;
+    return Container(
+      decoration: BoxDecoration(
+        color: PlayerUiConstants.sideSliderBackgroundColor, // Using constant
+        borderRadius:
+            PlayerUiConstants.sideSliderContainerRadius, // Using constant
+      ),
+      child: RotatedBox(
+        quarterTurns: 3,
+        child: SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            trackHeight:
+                PlayerUiConstants.sideSliderTrackHeight, // Using constant
+            thumbShape: RoundSliderThumbShape(
+              enabledThumbRadius:
+                  isFull
+                      ? PlayerUiConstants.sideSliderThumbRadiusFull
+                      : PlayerUiConstants
+                          .sideSliderThumbRadiusNormal, // Using constant
+            ),
+            overlayShape: RoundSliderOverlayShape(
+              overlayRadius:
+                  isFull
+                      ? PlayerUiConstants.sideSliderOverlayRadiusFull
+                      : PlayerUiConstants
+                          .sideSliderOverlayRadiusNormal, // Using constant
+            ),
+            activeTrackColor:
+                PlayerUiConstants.commonSliderActiveColor, // Using constant
+            inactiveTrackColor:
+                PlayerUiConstants.commonSliderInactiveColor, // Using constant
+            thumbColor:
+                PlayerUiConstants.commonSliderThumbColor, // Using constant
+          ),
+          child: Slider(
+            value: _brightness,
+            min: 0.0,
+            max: 1.0,
+            onChangeStart: (_) => _handleInteractionStart(),
+            onChangeEnd: (_) => _handleInteractionEnd(),
+            onChanged: (value) async {
+              setState(() => _brightness = value);
+              try {
+                await ScreenBrightness().setApplicationScreenBrightness(value);
+              } catch (e) {
+                print("Failed to set brightness: $e");
+              }
+              // Timer reset handled by onChangeEnd
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVolumeSlider(BuildContext context) {
+    final isFull = _isFullscreen && !_pipActive;
+    return Container(
+      decoration: BoxDecoration(
+        color: PlayerUiConstants.sideSliderBackgroundColor, // Using constant
+        borderRadius:
+            PlayerUiConstants.sideSliderContainerRadius, // Using constant
+      ),
+      child: RotatedBox(
+        quarterTurns: 3,
+        child: SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            trackHeight:
+                PlayerUiConstants.sideSliderTrackHeight, // Using constant
+            thumbShape: RoundSliderThumbShape(
+              enabledThumbRadius:
+                  isFull
+                      ? PlayerUiConstants.sideSliderThumbRadiusFull
+                      : PlayerUiConstants
+                          .sideSliderThumbRadiusNormal, // Using constant
+            ),
+            overlayShape: RoundSliderOverlayShape(
+              overlayRadius:
+                  isFull
+                      ? PlayerUiConstants.sideSliderOverlayRadiusFull
+                      : PlayerUiConstants
+                          .sideSliderOverlayRadiusNormal, // Using constant
+            ),
+            activeTrackColor:
+                PlayerUiConstants.commonSliderActiveColor, // Using constant
+            inactiveTrackColor:
+                PlayerUiConstants.commonSliderInactiveColor, // Using constant
+            thumbColor:
+                PlayerUiConstants.commonSliderThumbColor, // Using constant
+          ),
+          child: Slider(
+            value: _muted ? 0.0 : _volume,
+            min: 0.0,
+            max: 100.0,
+            onChangeStart: (_) => _handleInteractionStart(),
+            onChangeEnd: (_) => _handleInteractionEnd(),
+            onChanged: (value) {
+              setState(() {
+                _volume = value;
+                _muted = value == 0.0;
+              });
+              _player.setVolume(value);
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCentralControls(double iconSize, double playPauseIconSize) {
+    return Positioned.fill(
+      child: Align(
+        alignment: Alignment.center,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            IconButton(
+              iconSize: iconSize,
+              color: PlayerUiConstants.controlButtonIconColor, // Using constant
+              icon: const Icon(Icons.replay_10_sharp),
+              onPressed: () => _seekRelative(const Duration(seconds: -10)),
+            ),
+            SizedBox(
+              width:
+                  _isFullscreen
+                      ? PlayerUiConstants.centralControlSpacingFull
+                      : PlayerUiConstants.centralControlSpacingNormal,
+            ), // Using constant
+            ValueListenableBuilder<bool>(
+              valueListenable: _isPlayingNotifier,
+              builder: (context, isPlaying, child) {
+                return IconButton(
+                  iconSize: playPauseIconSize,
+                  color:
+                      PlayerUiConstants
+                          .controlButtonIconColor, // Using constant
+                  icon: Icon(
+                    isPlaying
+                        ? Icons.pause_circle_filled_sharp
+                        : Icons.play_circle_fill_sharp,
+                  ),
+                  onPressed: () {
+                    _player.playOrPause();
+                    _resetOverlayTimer();
+                  },
+                );
+              },
+            ),
+            SizedBox(
+              width:
+                  _isFullscreen
+                      ? PlayerUiConstants.centralControlSpacingFull
+                      : PlayerUiConstants.centralControlSpacingNormal,
+            ), // Using constant
+            IconButton(
+              iconSize: iconSize,
+              color: PlayerUiConstants.controlButtonIconColor, // Using constant
+              icon: const Icon(Icons.forward_10_sharp),
+              onPressed: () => _seekRelative(const Duration(seconds: 10)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBar(
+    BuildContext context,
+    double effectiveControlIconSize,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(PlayerUiConstants.p8), // Using constant
+      decoration: BoxDecoration(
+        color: PlayerUiConstants.bottomBarBackgroundColor, // Using constant
+        borderRadius:
+            PlayerUiConstants.bottomBarContainerRadius, // Using constant
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: PlayerUiConstants.p4,
+            ), // Using constant
+            child: Row(
+              children: [
+                ValueListenableBuilder<Duration>(
+                  valueListenable: _durationNotifier,
+                  builder: (context, duration, _) {
+                    return StreamBuilder<Duration>(
+                      stream: _player.stream.position,
+                      initialData: Duration.zero,
+                      builder: (context, snapshot) {
+                        final position = snapshot.data ?? Duration.zero;
+                        return Text(
+                          _formatDuration(position),
+                          style: TextStyle(
+                            color:
+                                PlayerUiConstants
+                                    .timeDisplayTextColor, // Using constant
+                            fontSize:
+                                _isFullscreen
+                                    ? PlayerUiConstants.timeDisplayFontSizeFull
+                                    : PlayerUiConstants
+                                        .timeDisplayFontSizeNormal, // Using constant
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+                Expanded(
+                  child: ValueListenableBuilder<Duration>(
+                    valueListenable: _durationNotifier,
+                    builder: (context, duration, _) {
+                      return StreamBuilder<Duration>(
+                        stream: _player.stream.position,
+                        initialData: Duration.zero,
+                        builder: (context, snapshot) {
+                          final position = snapshot.data ?? Duration.zero;
+                          return SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight:
+                                  _isFullscreen
+                                      ? PlayerUiConstants
+                                          .bottomBarSeekSliderTrackHeightFull
+                                      : PlayerUiConstants
+                                          .bottomBarSeekSliderTrackHeightNormal, // Using constant
+                              thumbShape: RoundSliderThumbShape(
+                                enabledThumbRadius:
+                                    _isFullscreen
+                                        ? 8.0
+                                        : 6.0, // Kept for now, can be const
+                              ),
+                              overlayShape: RoundSliderOverlayShape(
+                                overlayRadius:
+                                    _isFullscreen
+                                        ? 16.0
+                                        : 12.0, // Kept for now, can be const
+                              ),
+                              activeTrackColor:
+                                  PlayerUiConstants
+                                      .commonSliderActiveColor, // Using constant
+                              inactiveTrackColor:
+                                  PlayerUiConstants
+                                      .commonSliderInactiveColor, // Using constant
+                              thumbColor:
+                                  PlayerUiConstants
+                                      .commonSliderThumbColor, // Using constant
+                            ),
+                            child: Slider(
+                              value: position.inMilliseconds.toDouble().clamp(
+                                0.0,
+                                duration.inMilliseconds.toDouble() > 0
+                                    ? duration.inMilliseconds.toDouble()
+                                    : 1.0,
+                              ),
+                              min: 0.0,
+                              max:
+                                  duration.inMilliseconds.toDouble() > 0
+                                      ? duration.inMilliseconds.toDouble()
+                                      : 1.0,
+                              onChangeStart: (_) => _handleInteractionStart(),
+                              onChangeEnd: (_) => _handleInteractionEnd(),
+                              onChanged: (value) {
+                                _player.seek(
+                                  Duration(milliseconds: value.toInt()),
+                                );
+                              },
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+                ValueListenableBuilder<Duration>(
+                  valueListenable: _durationNotifier,
+                  builder: (context, duration, _) {
+                    return Text(
+                      _formatDuration(duration),
+                      style: TextStyle(
+                        color:
+                            PlayerUiConstants
+                                .timeDisplayTextColor, // Using constant
+                        fontSize:
+                            _isFullscreen
+                                ? PlayerUiConstants.timeDisplayFontSizeFull
+                                : PlayerUiConstants
+                                    .timeDisplayFontSizeNormal, // Using constant
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(
+            height: PlayerUiConstants.p4 / 2,
+          ), // Adjusted from 5, can be new constant
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              IconButton(
+                iconSize: effectiveControlIconSize,
+                color: Colors.white, // Can be a constant
+                icon: Icon(
+                  _muted ? Icons.volume_off_sharp : Icons.volume_up_sharp,
+                ),
+                onPressed: _toggleMute,
+              ),
+              const Spacer(),
+              Theme(
+                data: Theme.of(context).copyWith(
+                  canvasColor: Colors.black.withOpacity(
+                    PlayerUiConstants.primaryOpacity,
+                  ),
+                ), // Using constant
+                child: DropdownButton<double>(
+                  value: _playbackSpeed,
+                  icon: Icon(
+                    Icons.speed_sharp,
+                    color: Colors.white, // Can be a constant
+                    size: effectiveControlIconSize - 2,
+                  ),
+                  underline: Container(),
+                  dropdownColor: Colors.black.withOpacity(
+                    PlayerUiConstants.primaryOpacity,
+                  ), // Using constant
+                  style: TextStyle(
+                    color: Colors.white, // Can be a constant
+                    fontSize: _isFullscreen ? 15 : 13, // Can be constant
+                  ),
+                  items:
+                      [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map((speed) {
+                        return DropdownMenuItem<double>(
+                          value: speed,
+                          child: Text('${speed}x'),
+                        );
+                      }).toList(),
+                  onTap: () {
+                    _handleInteractionStart();
+                  },
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(() => _playbackSpeed = value);
+                      _player.setRate(value);
+                    }
+                    _handleInteractionEnd();
+                  },
+                ),
+              ),
+              const Spacer(),
+              if (!_pipActive && (ModalRoute.of(context)?.isCurrent ?? false))
+                IconButton(
+                  iconSize: effectiveControlIconSize,
+                  color: Colors.white, // Can be a constant
+                  icon: const Icon(Icons.picture_in_picture_alt_sharp),
+                  onPressed: _enterPiP,
+                ),
+              if (_pipActive)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    right: PlayerUiConstants.p8,
+                  ), // Using constant
+                  child: Icon(
+                    Icons.picture_in_picture_alt_sharp,
+                    color:
+                        PlayerUiConstants
+                            .commonSliderActiveColor, // Re-used amber color
+                    size: effectiveControlIconSize,
+                  ),
+                ),
+              IconButton(
+                iconSize: effectiveControlIconSize,
+                color: Colors.white, // Can be a constant
+                icon: Icon(
+                  _isFullscreen
+                      ? Icons.fullscreen_exit_sharp
+                      : Icons.fullscreen_sharp,
+                ),
+                onPressed: _toggleFullscreen,
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
